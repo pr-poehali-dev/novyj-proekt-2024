@@ -1,701 +1,515 @@
-import { useState, useRef, useCallback, useEffect } from "react";
-import Icon from "@/components/ui/icon";
+import { useState, useRef } from "react";
+import JSZip from "jszip";
+import { saveAs } from "file-saver";
 
-type ElementType = "text" | "button" | "image" | "shape" | "input" | "card";
-
-interface CanvasElement {
-  id: string;
-  type: ElementType;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  content: string;
-  color: string;
-  bgColor: string;
-  fontSize: number;
-  borderRadius: number;
-  opacity: number;
-  bold: boolean;
-  italic: boolean;
+interface Config {
+  appName: string;
+  authorName: string;
+  version: string;
+  createAutorun: boolean;
+  createWeb: boolean;
+  desktopShortcut: boolean;
+  requireAdmin: boolean;
+  autoLaunch: boolean;
 }
 
-const WIDGETS: { type: ElementType; label: string; icon: string; emoji: string }[] = [
-  { type: "text", label: "Текст", icon: "Type", emoji: "T" },
-  { type: "button", label: "Кнопка", icon: "MousePointerClick", emoji: "▶" },
-  { type: "input", label: "Поле", icon: "TextCursor", emoji: "▭" },
-  { type: "card", label: "Карточка", icon: "Square", emoji: "▣" },
-  { type: "image", label: "Фото", icon: "Image", emoji: "⬛" },
-  { type: "shape", label: "Фигура", icon: "Triangle", emoji: "◆" },
+type Step = "config" | "files" | "build" | "done";
+
+const STEPS: { id: Step; label: string }[] = [
+  { id: "config", label: "Настройки" },
+  { id: "files", label: "Файлы" },
+  { id: "build", label: "Сборка" },
+  { id: "done", label: "Готово" },
 ];
 
-const COLORS = [
-  "#c8ff00", "#ff2d78", "#00ffcc", "#ff6b35",
-  "#7c3aed", "#06b6d4", "#f59e0b", "#ffffff",
-  "#ef4444", "#10b981", "#3b82f6", "#000000",
-];
+function generateIss(cfg: Config, fileList: string[]): string {
+  const files = fileList.length > 0
+    ? fileList.map(f => `Source: "editor_files\\${f}"; DestDir: "{app}"; Flags: ignoreversion`).join("\n")
+    : `Source: "your_editor_files\\*"; DestDir: "{app}"; Flags: recursesubdirs`;
 
-function generateId() {
-  return Math.random().toString(36).slice(2, 9);
+  return `; Inno Setup Script — сгенерировано MyEditorConstructor Web
+; Автор: ${cfg.authorName}
+; Дата: ${new Date().toLocaleDateString("ru-RU")}
+
+[Setup]
+AppName=${cfg.appName}
+AppVersion=${cfg.version}
+AppPublisher=${cfg.authorName}
+DefaultDirName={autopf}\\${cfg.appName}
+DefaultGroupName=${cfg.appName}
+OutputDir=output
+OutputBaseFilename=${cfg.appName.replace(/\s+/g, "_")}_AutoInstall
+Compression=lzma
+SolidCompression=yes
+WizardStyle=modern
+${cfg.requireAdmin ? "PrivilegesRequired=admin" : "PrivilegesRequired=lowest"}
+DisableStartupPrompt=yes
+DisableProgramGroupPage=yes
+DirExistsWarning=no
+
+[Languages]
+Name: "russian"; MessagesFile: "compiler:Languages\\Russian.isl"
+
+[Files]
+${files}
+
+[Icons]
+Name: "{group}\\${cfg.appName}"; Filename: "{app}\\${cfg.appName}.exe"
+${cfg.desktopShortcut ? `Name: "{autodesktop}\\${cfg.appName}"; Filename: "{app}\\${cfg.appName}.exe"; Tasks: desktopicon` : ""}
+
+[Tasks]
+${cfg.desktopShortcut ? `Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Ярлыки:"; Flags: unchecked` : ""}
+
+[Run]
+${cfg.autoLaunch ? `Filename: "{app}\\${cfg.appName}.exe"; Description: "Запустить после установки"; Flags: nowait postinstall skipifsilent` : ""}
+`;
 }
 
-function makeElement(type: ElementType, x: number, y: number): CanvasElement {
-  const defaults: Record<ElementType, Partial<CanvasElement>> = {
-    text: { content: "Заголовок", width: 200, height: 50, color: "#ffffff", bgColor: "transparent", fontSize: 28, borderRadius: 0 },
-    button: { content: "Нажми меня", width: 160, height: 48, color: "#080810", bgColor: "#c8ff00", fontSize: 15, borderRadius: 8 },
-    input: { content: "Введите текст...", width: 220, height: 44, color: "#aaaaaa", bgColor: "#12121f", fontSize: 14, borderRadius: 6 },
-    card: { content: "Карточка", width: 200, height: 130, color: "#ffffff", bgColor: "#1a1a2e", fontSize: 16, borderRadius: 12 },
-    image: { content: "Изображение", width: 200, height: 140, color: "#555577", bgColor: "#12121f", fontSize: 13, borderRadius: 8 },
-    shape: { content: "", width: 100, height: 100, color: "#c8ff00", bgColor: "#c8ff00", fontSize: 14, borderRadius: 50 },
-  };
-  return {
-    id: generateId(),
-    type,
-    x,
-    y,
-    width: 200,
-    height: 60,
-    content: "",
-    color: "#ffffff",
-    bgColor: "#1a1a2e",
-    fontSize: 16,
-    borderRadius: 8,
-    opacity: 100,
-    bold: false,
-    italic: false,
-    ...defaults[type],
-  };
+function generateAutorun(cfg: Config): string {
+  return `[AutoRun]
+open=${cfg.appName.replace(/\s+/g, "_")}_AutoInstall.exe
+icon=icon.ico
+label=${cfg.appName}
+action=Установить ${cfg.appName}
+`;
 }
 
-function renderElement(el: CanvasElement) {
-  const baseStyle: React.CSSProperties = {
-    width: el.width,
-    height: el.height,
-    borderRadius: el.borderRadius,
-    opacity: el.opacity / 100,
-    fontSize: el.fontSize,
-    color: el.color,
-    backgroundColor: el.bgColor === "transparent" ? "transparent" : el.bgColor,
-    fontWeight: el.bold ? 700 : 400,
-    fontStyle: el.italic ? "italic" : "normal",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-    fontFamily: "'Golos Text', sans-serif",
-    userSelect: "none",
-    pointerEvents: "none",
-  };
-
-  if (el.type === "text") {
-    return <div style={{ ...baseStyle, justifyContent: "flex-start", padding: "4px 8px", fontFamily: "'Oswald', sans-serif" }}>{el.content}</div>;
-  }
-  if (el.type === "button") {
-    return <div style={{ ...baseStyle, cursor: "pointer", border: "none", fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", fontFamily: "'Oswald', sans-serif" }}>{el.content}</div>;
-  }
-  if (el.type === "input") {
-    return <div style={{ ...baseStyle, justifyContent: "flex-start", padding: "0 12px", border: "1px solid #2a2a3e" }}>{el.content}</div>;
-  }
-  if (el.type === "card") {
-    return (
-      <div style={{ ...baseStyle, flexDirection: "column", alignItems: "flex-start", justifyContent: "flex-end", padding: 16, border: "1px solid #22223b" }}>
-        <div style={{ width: "100%", height: 4, background: "#c8ff00", borderRadius: 2, marginBottom: 10 }} />
-        <span style={{ fontSize: el.fontSize, fontWeight: 600 }}>{el.content}</span>
-      </div>
-    );
-  }
-  if (el.type === "image") {
-    return (
-      <div style={{ ...baseStyle, flexDirection: "column", gap: 6, border: "1px dashed #2a2a3e" }}>
-        <span style={{ fontSize: 32 }}>🖼</span>
-        <span style={{ fontSize: 12, color: "#555577" }}>{el.content}</span>
-      </div>
-    );
-  }
-  if (el.type === "shape") {
-    return <div style={{ ...baseStyle }} />;
-  }
-  return null;
+function generateWebConfig(cfg: Config): string {
+  return JSON.stringify({
+    app_name: cfg.appName,
+    version: cfg.version,
+    author: cfg.authorName,
+    port: 8080,
+    debug: false,
+    auto_install: true,
+    require_admin: cfg.requireAdmin,
+    desktop_shortcut: cfg.desktopShortcut,
+    created_at: new Date().toISOString(),
+  }, null, 2);
 }
 
-const PANEL_TABS = ["Элементы", "Слои"] as const;
-type PanelTab = typeof PANEL_TABS[number];
+function generateReadme(cfg: Config, fileCount: number): string {
+  return `МОЙ КОНСТРУКТОР РЕДАКТОРОВ — АВТОУСТАНОВКА
+==========================================
+Приложение: ${cfg.appName}
+Версия: ${cfg.version}
+Автор: ${cfg.authorName}
+Дата сборки: ${new Date().toLocaleDateString("ru-RU")}
+
+КАК УСТАНОВИТЬ РЕДАКТОР АВТОМАТИЧЕСКИ:
+---------------------------------------
+1. Запустите файл ${cfg.appName.replace(/\s+/g, "_")}_AutoInstall.exe
+2. Установка начнётся автоматически без лишних действий
+3. Программа установится в: C:\\Program Files\\${cfg.appName}
+4. После установки появится ярлык в меню «Пуск»
+${cfg.desktopShortcut ? "5. Ярлык на рабочем столе — по желанию (галочка при установке)" : ""}
+
+КАК СОБРАТЬ .EXE УСТАНОВЩИК НА WINDOWS:
+-----------------------------------------
+1. Скачайте Inno Setup: https://jrsoftware.org/isdl.php
+2. Откройте файл setup.iss в Inno Setup Compiler
+3. Нажмите Build → Compile (Ctrl+F9)
+4. Готовый установщик появится в папке output\\
+
+ЧТО ВКЛЮЧЕНО В ПАКЕТ:
+----------------------
+- setup.iss             — скрипт сборки для Inno Setup
+- build.bat             — батник для быстрой сборки
+${cfg.createAutorun ? "- autorun.inf           — автозапуск с USB/CD\n" : ""}${cfg.createWeb ? "- web_config.json       — конфигурация веб-сервера\n" : ""}${fileCount > 0 ? `- editor_files/         — ${fileCount} файл(ов) редактора\n` : ""}- README_Установка.txt  — этот файл
+
+СИСТЕМНЫЕ ТРЕБОВАНИЯ:
+----------------------
+- Windows 7 / 8 / 10 / 11
+${cfg.requireAdmin ? "- Права администратора (требуются для установки)" : "- Права администратора не требуются"}
+
+АВТОРСКИЕ ПРАВА:
+-----------------
+© ${cfg.authorName}, ${new Date().getFullYear()}
+Данный редактор является собственностью ${cfg.authorName}.
+Использование и распространение допускается только с разрешения автора.
+`;
+}
+
+function generateBatch(cfg: Config): string {
+  return `@echo off
+chcp 65001 > nul
+title Сборка установщика: ${cfg.appName}
+echo.
+echo  Установка ${cfg.appName} v${cfg.version}
+echo  Автор: ${cfg.authorName}
+echo.
+echo  Шаг 1: Ищем Inno Setup Compiler...
+if exist "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe" (
+    set ISCC="C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe"
+) else if exist "C:\\Program Files\\Inno Setup 6\\ISCC.exe" (
+    set ISCC="C:\\Program Files\\Inno Setup 6\\ISCC.exe"
+) else (
+    echo  ОШИБКА: Inno Setup не найден!
+    echo  Скачайте: https://jrsoftware.org/isdl.php
+    pause
+    exit /b 1
+)
+echo  Inno Setup найден.
+echo.
+echo  Шаг 2: Компиляция setup.iss...
+%ISCC% setup.iss
+if %errorlevel% == 0 (
+    echo.
+    echo  ГОТОВО! Установщик создан в папке output\\
+) else (
+    echo  ОШИБКА при компиляции!
+)
+echo.
+pause
+`;
+}
 
 export default function Index() {
-  const [elements, setElements] = useState<CanvasElement[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [panelTab, setPanelTab] = useState<PanelTab>("Элементы");
-  const [dragging, setDragging] = useState<{ id: string; offX: number; offY: number } | null>(null);
-  const [resizing, setResizing] = useState<{ id: string; startX: number; startY: number; startW: number; startH: number } | null>(null);
-  const [showGrid, setShowGrid] = useState(true);
-  const canvasRef = useRef<HTMLDivElement>(null);
+  const [step, setStep] = useState<Step>("config");
+  const [cfg, setCfg] = useState<Config>({
+    appName: "",
+    authorName: "",
+    version: "1.0",
+    createAutorun: false,
+    createWeb: false,
+    desktopShortcut: true,
+    requireAdmin: true,
+    autoLaunch: true,
+  });
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
+  const [progress, setProgress] = useState(0);
+  const [zipUrl, setZipUrl] = useState<string | null>(null);
+  const [zipName, setZipName] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const selectedEl = elements.find((e) => e.id === selected) ?? null;
+  const stepIdx = STEPS.findIndex((s) => s.id === step);
 
-  function updateElement(id: string, patch: Partial<CanvasElement>) {
-    setElements((els) => els.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+  function updateCfg(patch: Partial<Config>) {
+    setCfg((c) => ({ ...c, ...patch }));
   }
 
-  function deleteElement(id: string) {
-    setElements((els) => els.filter((e) => e.id !== id));
-    if (selected === id) setSelected(null);
+  function handleFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    if (e.target.files) setUploadedFiles(Array.from(e.target.files));
   }
 
-  function duplicateElement(id: string) {
-    const el = elements.find((e) => e.id === id);
-    if (!el) return;
-    const copy = { ...el, id: generateId(), x: el.x + 20, y: el.y + 20 };
-    setElements((els) => [...els, copy]);
-    setSelected(copy.id);
-  }
+  async function buildPackage() {
+    setStep("build");
+    setProgress(0);
 
-  function addElement(type: ElementType) {
-    const el = makeElement(type, 80 + Math.random() * 200, 60 + Math.random() * 200);
-    setElements((els) => [...els, el]);
-    setSelected(el.id);
-  }
+    await new Promise((r) => setTimeout(r, 400)); setProgress(20);
+    await new Promise((r) => setTimeout(r, 500)); setProgress(50);
+    await new Promise((r) => setTimeout(r, 400)); setProgress(75);
 
-  const onCanvasMouseMove = useCallback((e: React.MouseEvent) => {
-    if (dragging) {
-      const rect = canvasRef.current!.getBoundingClientRect();
-      const nx = e.clientX - rect.left - dragging.offX;
-      const ny = e.clientY - rect.top - dragging.offY;
-      updateElement(dragging.id, { x: Math.max(0, nx), y: Math.max(0, ny) });
+    const zip = new JSZip();
+    const fileNames = uploadedFiles.map((f) => f.name);
+
+    zip.file("setup.iss", generateIss(cfg, fileNames));
+    zip.file("README_Установка.txt", generateReadme(cfg, uploadedFiles.length));
+    zip.file("build.bat", generateBatch(cfg));
+    if (cfg.createAutorun) zip.file("autorun.inf", generateAutorun(cfg));
+    if (cfg.createWeb) zip.file("web_config.json", generateWebConfig(cfg));
+
+    if (uploadedFiles.length > 0) {
+      const folder = zip.folder("editor_files")!;
+      for (const file of uploadedFiles) folder.file(file.name, file);
     }
-    if (resizing) {
-      const dx = e.clientX - resizing.startX;
-      const dy = e.clientY - resizing.startY;
-      updateElement(resizing.id, {
-        width: Math.max(60, resizing.startW + dx),
-        height: Math.max(30, resizing.startH + dy),
-      });
-    }
-  }, [dragging, resizing]);
 
-  const onCanvasMouseUp = useCallback(() => {
-    setDragging(null);
-    setResizing(null);
-  }, []);
+    await new Promise((r) => setTimeout(r, 300)); setProgress(90);
 
-  function onElementMouseDown(e: React.MouseEvent, id: string) {
-    e.stopPropagation();
-    setSelected(id);
-    const el = elements.find((el) => el.id === id)!;
-    const rect = canvasRef.current!.getBoundingClientRect();
-    setDragging({ id, offX: e.clientX - rect.left - el.x, offY: e.clientY - rect.top - el.y });
+    const timestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const name = `${cfg.appName.replace(/\s+/g, "_")}_Package_${timestamp}.zip`;
+    setZipName(name);
+
+    const blob = await zip.generateAsync({ type: "blob" });
+    setZipUrl(URL.createObjectURL(blob));
+
+    setProgress(100);
+    await new Promise((r) => setTimeout(r, 300));
+    setStep("done");
   }
 
-  function onResizeMouseDown(e: React.MouseEvent, id: string) {
-    e.stopPropagation();
-    const el = elements.find((el) => el.id === id)!;
-    setResizing({ id, startX: e.clientX, startY: e.clientY, startW: el.width, startH: el.height });
+  function download() {
+    if (zipUrl) saveAs(zipUrl, zipName);
   }
 
-  useEffect(() => {
-    function handleKey(e: KeyboardEvent) {
-      if ((e.key === "Delete" || e.key === "Backspace") && selected) {
-        const tag = (document.activeElement as HTMLElement)?.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA") return;
-        deleteElement(selected);
-      }
-    }
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [selected]);
+  function reset() {
+    setStep("config");
+    setCfg({ appName: "", authorName: "", version: "1.0", createAutorun: false, createWeb: false, desktopShortcut: true, requireAdmin: true, autoLaunch: true });
+    setUploadedFiles([]);
+    setProgress(0);
+    setZipUrl(null);
+  }
+
+  const canNext = step === "config" ? cfg.appName.trim().length > 0 && cfg.authorName.trim().length > 0 : true;
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-void-900 font-golos" style={{ fontFamily: "'Golos Text', sans-serif" }}>
-
-      {/* LEFT PANEL */}
-      <aside className="w-[220px] flex-shrink-0 flex flex-col border-r border-[#1a1a2e] bg-void-800 animate-slide-left">
-        {/* Logo */}
-        <div className="flex items-center gap-2 px-5 py-4 border-b border-[#1a1a2e]">
-          <div className="w-7 h-7 rounded-md flex items-center justify-center" style={{ background: "#c8ff00" }}>
-            <span style={{ color: "#080810", fontWeight: 900, fontSize: 13, fontFamily: "'Oswald', sans-serif" }}>C</span>
+    <div
+      className="min-h-screen flex flex-col items-center justify-start py-10 px-4"
+      style={{
+        fontFamily: "'Golos Text', sans-serif",
+        background: "#080810",
+        backgroundImage: `
+          radial-gradient(ellipse 80% 40% at 50% 0%, #0d1a0060 0%, transparent 60%),
+          linear-gradient(to right, #12121f 1px, transparent 1px),
+          linear-gradient(to bottom, #12121f 1px, transparent 1px)
+        `,
+        backgroundSize: "auto, 60px 60px, 60px 60px",
+      }}
+    >
+      {/* Header */}
+      <div className="text-center mb-10" style={{ animation: "fadeUp 0.5s ease-out" }}>
+        <div className="flex items-center justify-center gap-3 mb-3">
+          <div style={{ width: 44, height: 44, borderRadius: 10, background: "#c8ff00", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 0 24px #c8ff0060" }}>
+            <span style={{ fontFamily: "'Oswald', sans-serif", fontWeight: 900, fontSize: 22, color: "#080810" }}>C</span>
           </div>
-          <span style={{ fontFamily: "'Oswald', sans-serif", fontWeight: 600, color: "#ffffff", fontSize: 15, letterSpacing: 2 }}>CONSTRUCT</span>
+          <h1 style={{ fontFamily: "'Oswald', sans-serif", fontSize: 26, fontWeight: 700, color: "#ffffff", letterSpacing: 4, margin: 0 }}>
+            EDITOR CONSTRUCTOR
+          </h1>
+          <span style={{ background: "#0d1200", border: "1px solid #c8ff00", color: "#c8ff00", fontSize: 10, fontFamily: "'Oswald', sans-serif", letterSpacing: 2, padding: "3px 8px", borderRadius: 4 }}>
+            v2.1 WEB
+          </span>
         </div>
-
-        {/* Tabs */}
-        <div className="flex border-b border-[#1a1a2e]">
-          {PANEL_TABS.map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setPanelTab(tab)}
-              className="flex-1 py-2.5 text-xs transition-all"
-              style={{
-                fontFamily: "'Oswald', sans-serif",
-                fontWeight: 500,
-                letterSpacing: 1,
-                color: panelTab === tab ? "#c8ff00" : "#555577",
-                borderBottom: panelTab === tab ? "2px solid #c8ff00" : "2px solid transparent",
-                background: "transparent",
-              }}
-            >
-              {tab.toUpperCase()}
-            </button>
-          ))}
-        </div>
-
-        {/* Tab Content */}
-        <div className="flex-1 overflow-y-auto p-3">
-          {panelTab === "Элементы" && (
-            <div className="grid grid-cols-2 gap-2">
-              {WIDGETS.map((w) => (
-                <button
-                  key={w.type}
-                  onClick={() => addElement(w.type)}
-                  className="flex flex-col items-center gap-1.5 p-3 rounded-lg border transition-all group"
-                  style={{
-                    background: "#0d0d1a",
-                    border: "1px solid #22223b",
-                    color: "#888899",
-                  }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLElement).style.borderColor = "#c8ff00";
-                    (e.currentTarget as HTMLElement).style.color = "#c8ff00";
-                    (e.currentTarget as HTMLElement).style.background = "#0d1200";
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLElement).style.borderColor = "#22223b";
-                    (e.currentTarget as HTMLElement).style.color = "#888899";
-                    (e.currentTarget as HTMLElement).style.background = "#0d0d1a";
-                  }}
-                >
-                  <span style={{ fontSize: 20 }}>{w.emoji}</span>
-                  <span style={{ fontSize: 11, fontFamily: "'Oswald', sans-serif", letterSpacing: 1 }}>{w.label.toUpperCase()}</span>
-                </button>
-              ))}
-            </div>
-          )}
-
-          {panelTab === "Слои" && (
-            <div className="flex flex-col gap-1">
-              {elements.length === 0 && (
-                <div className="text-center py-8" style={{ color: "#333355", fontSize: 12 }}>
-                  Нет элементов
-                </div>
-              )}
-              {[...elements].reverse().map((el) => (
-                <button
-                  key={el.id}
-                  onClick={() => setSelected(el.id)}
-                  className="flex items-center gap-2 px-3 py-2 rounded-md text-left transition-all"
-                  style={{
-                    background: selected === el.id ? "#0d1200" : "transparent",
-                    border: selected === el.id ? "1px solid #c8ff00" : "1px solid transparent",
-                    color: selected === el.id ? "#c8ff00" : "#666688",
-                    fontSize: 12,
-                  }}
-                >
-                  <Icon name={WIDGETS.find((w) => w.type === el.type)?.icon ?? "Square"} size={12} fallback="Square" />
-                  <span style={{ fontFamily: "'Oswald', sans-serif", letterSpacing: 0.5 }}>
-                    {el.type.toUpperCase()} {el.content ? `— ${el.content.slice(0, 10)}` : ""}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </aside>
-
-      {/* CANVAS */}
-      <div className="flex-1 flex flex-col">
-        {/* Toolbar */}
-        <div className="flex items-center justify-between px-5 py-3 border-b border-[#1a1a2e] bg-void-800">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowGrid((v) => !v)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs transition-all"
-              style={{
-                background: showGrid ? "#0d1200" : "#12121f",
-                border: `1px solid ${showGrid ? "#c8ff00" : "#22223b"}`,
-                color: showGrid ? "#c8ff00" : "#555577",
-                fontFamily: "'Oswald', sans-serif",
-                letterSpacing: 1,
-              }}
-            >
-              <Icon name="Grid3X3" size={12} fallback="Square" />
-              СЕТКА
-            </button>
-            {selected && (
-              <>
-                <button
-                  onClick={() => selected && duplicateElement(selected)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs transition-all"
-                  style={{ background: "#12121f", border: "1px solid #22223b", color: "#555577", fontFamily: "'Oswald', sans-serif", letterSpacing: 1 }}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "#00ffcc"; (e.currentTarget as HTMLElement).style.borderColor = "#00ffcc"; }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = "#555577"; (e.currentTarget as HTMLElement).style.borderColor = "#22223b"; }}
-                >
-                  <Icon name="Copy" size={12} fallback="Copy" />
-                  КОПИЯ
-                </button>
-                <button
-                  onClick={() => selected && deleteElement(selected)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs transition-all"
-                  style={{ background: "#12121f", border: "1px solid #22223b", color: "#555577", fontFamily: "'Oswald', sans-serif", letterSpacing: 1 }}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "#ff2d78"; (e.currentTarget as HTMLElement).style.borderColor = "#ff2d78"; }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = "#555577"; (e.currentTarget as HTMLElement).style.borderColor = "#22223b"; }}
-                >
-                  <Icon name="Trash2" size={12} fallback="Trash2" />
-                  УДАЛИТЬ
-                </button>
-              </>
-            )}
-          </div>
-          <div className="flex items-center gap-3">
-            <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 11, color: "#333355", letterSpacing: 2 }}>
-              {elements.length} ЭЛ.
-            </span>
-            <button
-              className="px-4 py-1.5 rounded text-xs font-bold transition-all animate-pulse-neon"
-              style={{ background: "#c8ff00", color: "#080810", fontFamily: "'Oswald', sans-serif", letterSpacing: 2 }}
-            >
-              ОПУБЛИКОВАТЬ
-            </button>
-          </div>
-        </div>
-
-        {/* Canvas Area */}
-        <div
-          className="flex-1 overflow-auto"
-          style={{ background: "#080810" }}
-          onClick={() => setSelected(null)}
-        >
-          <div
-            ref={canvasRef}
-            className="relative mx-auto my-8"
-            style={{
-              width: 900,
-              height: 600,
-              background: "#0d0d1a",
-              border: "1px solid #1a1a2e",
-              borderRadius: 12,
-              backgroundImage: showGrid
-                ? `
-                  linear-gradient(to right, #1a1a2e 1px, transparent 1px),
-                  linear-gradient(to bottom, #1a1a2e 1px, transparent 1px)
-                `
-                : "none",
-              backgroundSize: showGrid ? "40px 40px" : "auto",
-              cursor: dragging ? "grabbing" : "default",
-              boxShadow: "0 0 80px #c8ff0010, 0 0 0 1px #1a1a2e",
-            }}
-            onMouseMove={onCanvasMouseMove}
-            onMouseUp={onCanvasMouseUp}
-            onMouseLeave={onCanvasMouseUp}
-          >
-            {/* Empty state */}
-            {elements.length === 0 && (
-              <div
-                className="absolute inset-0 flex flex-col items-center justify-center gap-4 pointer-events-none"
-                style={{ animation: "fade-in 0.6s ease-out" }}
-              >
-                <div
-                  style={{
-                    width: 64,
-                    height: 64,
-                    borderRadius: 16,
-                    background: "#12121f",
-                    border: "1px solid #22223b",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <span style={{ fontSize: 28 }}>✦</span>
-                </div>
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 18, color: "#333355", letterSpacing: 3 }}>ХОЛСТ ПУСТ</div>
-                  <div style={{ fontSize: 12, color: "#222233", marginTop: 6 }}>Добавьте элементы из панели слева</div>
-                </div>
-              </div>
-            )}
-
-            {/* Elements */}
-            {elements.map((el) => (
-              <div
-                key={el.id}
-                style={{
-                  position: "absolute",
-                  left: el.x,
-                  top: el.y,
-                  cursor: "grab",
-                  outline: selected === el.id ? "2px solid #c8ff00" : "2px solid transparent",
-                  outlineOffset: 2,
-                  borderRadius: el.borderRadius + 2,
-                  transition: "outline 0.15s",
-                }}
-                onMouseDown={(e) => onElementMouseDown(e, el.id)}
-              >
-                {renderElement(el)}
-
-                {/* Resize handle */}
-                {selected === el.id && (
-                  <>
-                    <div
-                      style={{
-                        position: "absolute",
-                        right: -5,
-                        bottom: -5,
-                        width: 10,
-                        height: 10,
-                        background: "#c8ff00",
-                        borderRadius: 2,
-                        cursor: "se-resize",
-                        zIndex: 10,
-                      }}
-                      onMouseDown={(e) => onResizeMouseDown(e, el.id)}
-                    />
-                    {/* Corner dots */}
-                    {[[-4, -4], [el.width - 4, -4], [-4, el.height - 4]].map(([rx, ry], i) => (
-                      <div
-                        key={i}
-                        style={{
-                          position: "absolute",
-                          left: rx,
-                          top: ry,
-                          width: 8,
-                          height: 8,
-                          background: "#0d0d1a",
-                          border: "1.5px solid #c8ff00",
-                          borderRadius: 2,
-                        }}
-                      />
-                    ))}
-                  </>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
+        <p style={{ color: "#444466", fontSize: 13, letterSpacing: 1, margin: 0 }}>
+          Генерация установщиков для Windows прямо в браузере
+        </p>
       </div>
 
-      {/* RIGHT PANEL — Inspector */}
-      <aside
-        className="w-[240px] flex-shrink-0 flex flex-col border-l border-[#1a1a2e] bg-void-800 overflow-y-auto animate-slide-right"
-      >
-        <div className="px-5 py-4 border-b border-[#1a1a2e]">
-          <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 11, color: "#333355", letterSpacing: 3 }}>ИНСПЕКТОР</span>
+      {/* Steps */}
+      <div className="flex items-center gap-0 mb-8">
+        {STEPS.map((s, i) => {
+          const isActive = s.id === step;
+          const isDone = stepIdx > i;
+          return (
+            <div key={s.id} className="flex items-center">
+              <div className="flex flex-col items-center">
+                <div style={{ width: 32, height: 32, borderRadius: "50%", background: isDone ? "#c8ff00" : isActive ? "#0d1200" : "#12121f", border: `2px solid ${isDone || isActive ? "#c8ff00" : "#22223b"}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: isDone ? "#080810" : isActive ? "#c8ff00" : "#333355", fontFamily: "'Oswald', sans-serif", transition: "all 0.3s" }}>
+                  {isDone ? "✓" : i + 1}
+                </div>
+                <span style={{ fontSize: 9, fontFamily: "'Oswald', sans-serif", letterSpacing: 1, color: isActive ? "#c8ff00" : isDone ? "#666" : "#222233", marginTop: 4 }}>
+                  {s.label.toUpperCase()}
+                </span>
+              </div>
+              {i < STEPS.length - 1 && (
+                <div style={{ width: 60, height: 1, background: isDone ? "#c8ff0050" : "#1a1a2e", marginBottom: 18 }} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Card */}
+      <div className="w-full max-w-xl" style={{ background: "#0d0d1a", border: "1px solid #1a1a2e", borderRadius: 16, overflow: "hidden", boxShadow: "0 0 60px #c8ff0008" }}>
+        {/* Card header bar */}
+        <div style={{ padding: "16px 24px", borderBottom: "1px solid #1a1a2e", display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 4, height: 20, background: "#c8ff00", borderRadius: 2 }} />
+          <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 13, color: "#ffffff", letterSpacing: 2 }}>
+            {step === "config" && "ОСНОВНЫЕ НАСТРОЙКИ"}
+            {step === "files" && "ФАЙЛЫ РЕДАКТОРА"}
+            {step === "build" && "ИДЁТ СБОРКА..."}
+            {step === "done" && "ПАКЕТ ГОТОВ"}
+          </span>
         </div>
 
-        {!selectedEl ? (
-          <div className="flex-1 flex items-center justify-center">
-            <div style={{ textAlign: "center", color: "#222233" }}>
-              <div style={{ fontSize: 28, marginBottom: 8 }}>◎</div>
-              <div style={{ fontSize: 11, fontFamily: "'Oswald', sans-serif", letterSpacing: 2 }}>НЕТ ВЫДЕЛЕНИЯ</div>
+        {/* STEP CONFIG */}
+        {step === "config" && (
+          <div className="p-6 flex flex-col gap-4">
+            <Field label="НАЗВАНИЕ ПРИЛОЖЕНИЯ" required>
+              <input value={cfg.appName} onChange={(e) => updateCfg({ appName: e.target.value })} placeholder="MyEditor Pro" style={iStyle}
+                onFocus={(e) => (e.target.style.borderColor = "#c8ff00")} onBlur={(e) => (e.target.style.borderColor = "#22223b")} />
+            </Field>
+            <Field label="ИМЯ АВТОРА / ПРАВООБЛАДАТЕЛЬ" required>
+              <input value={cfg.authorName} onChange={(e) => updateCfg({ authorName: e.target.value })} placeholder="Николаев Владимир Владимирович" style={iStyle}
+                onFocus={(e) => (e.target.style.borderColor = "#c8ff00")} onBlur={(e) => (e.target.style.borderColor = "#22223b")} />
+            </Field>
+            <Field label="ВЕРСИЯ">
+              <input value={cfg.version} onChange={(e) => updateCfg({ version: e.target.value })} placeholder="1.0" style={{ ...iStyle, width: 120 }}
+                onFocus={(e) => (e.target.style.borderColor = "#c8ff00")} onBlur={(e) => (e.target.style.borderColor = "#22223b")} />
+            </Field>
+            <div style={{ height: 1, background: "#1a1a2e" }} />
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { key: "createAutorun" as const, label: "autorun.inf", desc: "Автозапуск с USB/CD" },
+                { key: "createWeb" as const, label: "web_config.json", desc: "Конфиг веб-сервера" },
+                { key: "desktopShortcut" as const, label: "Ярлык на рабочем столе", desc: "Desktop shortcut" },
+                { key: "requireAdmin" as const, label: "Права администратора", desc: "Для системных папок" },
+                { key: "autoLaunch" as const, label: "Автозапуск после установки", desc: "Run after install" },
+              ].map(({ key, label, desc }) => (
+                <label key={key} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 12px", borderRadius: 8, border: `1px solid ${cfg[key] ? "#c8ff00" : "#1a1a2e"}`, background: cfg[key] ? "#0d1200" : "#12121f", cursor: "pointer", transition: "all 0.2s" }}
+                  onClick={() => updateCfg({ [key]: !cfg[key] })}>
+                  <div style={{ width: 16, height: 16, borderRadius: 3, border: `2px solid ${cfg[key] ? "#c8ff00" : "#333355"}`, background: cfg[key] ? "#c8ff00" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 2 }}>
+                    {cfg[key] && <span style={{ color: "#080810", fontSize: 10, fontWeight: 900, lineHeight: 1 }}>✓</span>}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: cfg[key] ? "#c8ff00" : "#888899", fontWeight: 600 }}>{label}</div>
+                    <div style={{ fontSize: 10, color: "#333355", marginTop: 1 }}>{desc}</div>
+                  </div>
+                </label>
+              ))}
             </div>
           </div>
-        ) : (
-          <div className="flex flex-col gap-1 p-4">
-            {/* Type badge */}
-            <div className="flex items-center gap-2 mb-3">
-              <span
-                style={{
-                  background: "#0d1200",
-                  border: "1px solid #c8ff00",
-                  color: "#c8ff00",
-                  fontSize: 10,
-                  fontFamily: "'Oswald', sans-serif",
-                  letterSpacing: 2,
-                  padding: "2px 8px",
-                  borderRadius: 4,
-                }}
-              >
-                {selectedEl.type.toUpperCase()}
-              </span>
+        )}
+
+        {/* STEP FILES */}
+        {step === "files" && (
+          <div className="p-6 flex flex-col gap-4">
+            <div
+              style={{ border: "2px dashed #22223b", borderRadius: 12, padding: "36px 24px", textAlign: "center", cursor: "pointer", transition: "all 0.2s", background: uploadedFiles.length > 0 ? "#0d1200" : "#12121f" }}
+              onClick={() => fileInputRef.current?.click()}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => { e.preventDefault(); setUploadedFiles(Array.from(e.dataTransfer.files)); }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.borderColor = "#c8ff00"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.borderColor = "#22223b"; }}
+            >
+              <div style={{ fontSize: 36, marginBottom: 10 }}>📁</div>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 13, color: "#888899", letterSpacing: 2 }}>
+                {uploadedFiles.length > 0 ? `ДОБАВЛЕНО ${uploadedFiles.length} ФАЙЛОВ` : "ПЕРЕТАЩИТЕ ИЛИ КЛИКНИТЕ"}
+              </div>
+              <div style={{ fontSize: 11, color: "#333355", marginTop: 4 }}>.exe, .dll, .ini, .cfg и другие файлы редактора</div>
+              <input ref={fileInputRef} type="file" multiple style={{ display: "none" }} onChange={handleFiles} />
             </div>
 
-            {/* Content */}
-            {selectedEl.type !== "shape" && (
-              <PropSection label="СОДЕРЖИМОЕ">
-                <textarea
-                  value={selectedEl.content}
-                  onChange={(e) => updateElement(selectedEl.id, { content: e.target.value })}
-                  rows={2}
-                  className="w-full rounded px-3 py-2 text-sm resize-none"
-                  style={{
-                    background: "#0d0d1a",
-                    border: "1px solid #22223b",
-                    color: "#ccccee",
-                    fontFamily: "'Golos Text', sans-serif",
-                    outline: "none",
-                  }}
-                  onFocus={(e) => (e.target.style.borderColor = "#c8ff00")}
-                  onBlur={(e) => (e.target.style.borderColor = "#22223b")}
-                />
-              </PropSection>
-            )}
-
-            {/* Position & Size */}
-            <PropSection label="ПОЗИЦИЯ И РАЗМЕР">
-              <div className="grid grid-cols-2 gap-2">
-                {[
-                  { label: "X", key: "x" as const },
-                  { label: "Y", key: "y" as const },
-                  { label: "W", key: "width" as const },
-                  { label: "H", key: "height" as const },
-                ].map(({ label, key }) => (
-                  <div key={key}>
-                    <div style={{ fontSize: 9, color: "#333355", fontFamily: "'Oswald', sans-serif", letterSpacing: 1, marginBottom: 2 }}>{label}</div>
-                    <input
-                      type="number"
-                      value={Math.round(selectedEl[key] as number)}
-                      onChange={(e) => updateElement(selectedEl.id, { [key]: Number(e.target.value) })}
-                      className="w-full rounded px-2 py-1.5 text-xs"
-                      style={{ background: "#0d0d1a", border: "1px solid #22223b", color: "#ccccee", outline: "none" }}
-                      onFocus={(e) => (e.target.style.borderColor = "#c8ff00")}
-                      onBlur={(e) => (e.target.style.borderColor = "#22223b")}
-                    />
+            {uploadedFiles.length > 0 && (
+              <div className="flex flex-col gap-1 max-h-44 overflow-y-auto">
+                {uploadedFiles.map((f, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", background: "#12121f", borderRadius: 6, border: "1px solid #1a1a2e" }}>
+                    <span style={{ fontSize: 14 }}>{f.name.endsWith(".exe") ? "⚙️" : f.name.endsWith(".dll") ? "🔧" : "📄"}</span>
+                    <span style={{ flex: 1, fontSize: 12, color: "#888899" }}>{f.name}</span>
+                    <span style={{ fontSize: 10, color: "#333355" }}>{(f.size / 1024).toFixed(1)} KB</span>
                   </div>
                 ))}
               </div>
-            </PropSection>
+            )}
 
-            {/* Typography */}
-            <PropSection label="ТИПОГРАФИКА">
-              <div className="flex items-center gap-2 mb-2">
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 9, color: "#333355", fontFamily: "'Oswald', sans-serif", letterSpacing: 1, marginBottom: 2 }}>РАЗМЕР</div>
-                  <input
-                    type="number"
-                    value={selectedEl.fontSize}
-                    onChange={(e) => updateElement(selectedEl.id, { fontSize: Number(e.target.value) })}
-                    className="w-full rounded px-2 py-1.5 text-xs"
-                    style={{ background: "#0d0d1a", border: "1px solid #22223b", color: "#ccccee", outline: "none" }}
-                    onFocus={(e) => (e.target.style.borderColor = "#c8ff00")}
-                    onBlur={(e) => (e.target.style.borderColor = "#22223b")}
-                  />
+            <div style={{ padding: "12px 16px", background: "#0d0d1a", border: "1px solid #22223b", borderRadius: 8, borderLeft: "3px solid #00ffcc" }}>
+              <div style={{ fontSize: 11, color: "#00ffcc", fontFamily: "'Oswald', sans-serif", letterSpacing: 1, marginBottom: 4 }}>ℹ НЕОБЯЗАТЕЛЬНО</div>
+              <div style={{ fontSize: 12, color: "#555577", lineHeight: 1.6 }}>
+                Файлы добавятся в ZIP-пакет в папку <span style={{ color: "#c8ff00" }}>editor_files/</span>. Скрипт setup.iss будет автоматически настроен на их подключение.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* STEP BUILD */}
+        {step === "build" && (
+          <div className="p-8 flex flex-col items-center gap-6">
+            <div style={{ fontSize: 48 }}>⚙️</div>
+            <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 16, color: "#c8ff00", letterSpacing: 3 }}>СБОРКА ПАКЕТА...</div>
+            <div style={{ width: "100%", height: 6, background: "#12121f", borderRadius: 3, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${progress}%`, background: "linear-gradient(to right, #c8ff00, #00ffcc)", borderRadius: 3, transition: "width 0.4s ease", boxShadow: "0 0 12px #c8ff0080" }} />
+            </div>
+            <div style={{ fontSize: 12, color: "#333355" }}>{progress}%</div>
+          </div>
+        )}
+
+        {/* STEP DONE */}
+        {step === "done" && (
+          <div className="p-6 flex flex-col gap-5">
+            <div className="text-center">
+              <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#0d1200", border: "2px solid #c8ff00", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px", fontSize: 26, boxShadow: "0 0 24px #c8ff0040" }}>✓</div>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 18, color: "#c8ff00", letterSpacing: 3 }}>ПАКЕТ ГОТОВ</div>
+              <div style={{ fontSize: 11, color: "#444466", marginTop: 4 }}>{zipName}</div>
+            </div>
+
+            {/* Contents */}
+            <div style={{ background: "#12121f", border: "1px solid #1a1a2e", borderRadius: 10, padding: 16 }}>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 10, color: "#555577", letterSpacing: 2, marginBottom: 10 }}>СОДЕРЖИМОЕ ZIP-ПАКЕТА</div>
+              {[
+                { icon: "📄", name: "setup.iss", desc: "Скрипт Inno Setup для сборки .exe" },
+                { icon: "⚡", name: "build.bat", desc: "Батник — автоматически находит и запускает Inno Setup" },
+                { icon: "📋", name: "README_Установка.txt", desc: "Инструкция по установке" },
+                ...(cfg.createAutorun ? [{ icon: "💿", name: "autorun.inf", desc: "Автозапуск с USB/CD" }] : []),
+                ...(cfg.createWeb ? [{ icon: "🌐", name: "web_config.json", desc: "Конфигурация веб-сервера" }] : []),
+                ...(uploadedFiles.length > 0 ? [{ icon: "📁", name: `editor_files/  (${uploadedFiles.length} файл.)`, desc: "Файлы вашего редактора" }] : []),
+              ].map((f, i, arr) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: i < arr.length - 1 ? "1px solid #1a1a2e" : "none" }}>
+                  <span style={{ fontSize: 16 }}>{f.icon}</span>
+                  <div>
+                    <div style={{ fontSize: 12, color: "#c8ff00", fontFamily: "'Oswald', sans-serif" }}>{f.name}</div>
+                    <div style={{ fontSize: 10, color: "#333355" }}>{f.desc}</div>
+                  </div>
                 </div>
-                <div className="flex gap-1 mt-4">
-                  <button
-                    onClick={() => updateElement(selectedEl.id, { bold: !selectedEl.bold })}
-                    style={{
-                      width: 30,
-                      height: 30,
-                      borderRadius: 6,
-                      background: selectedEl.bold ? "#0d1200" : "#0d0d1a",
-                      border: `1px solid ${selectedEl.bold ? "#c8ff00" : "#22223b"}`,
-                      color: selectedEl.bold ? "#c8ff00" : "#555577",
-                      fontWeight: 700,
-                      fontSize: 13,
-                      cursor: "pointer",
-                    }}
-                  >B</button>
-                  <button
-                    onClick={() => updateElement(selectedEl.id, { italic: !selectedEl.italic })}
-                    style={{
-                      width: 30,
-                      height: 30,
-                      borderRadius: 6,
-                      background: selectedEl.italic ? "#0d1200" : "#0d0d1a",
-                      border: `1px solid ${selectedEl.italic ? "#c8ff00" : "#22223b"}`,
-                      color: selectedEl.italic ? "#c8ff00" : "#555577",
-                      fontStyle: "italic",
-                      fontSize: 13,
-                      cursor: "pointer",
-                    }}
-                  >I</button>
+              ))}
+            </div>
+
+            {/* Windows guide */}
+            <div style={{ background: "#0d0020", border: "1px solid #7c3aed40", borderRadius: 10, padding: 16, borderLeft: "3px solid #7c3aed" }}>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 10, color: "#7c3aed", letterSpacing: 2, marginBottom: 8 }}>🪟 КАК СОБРАТЬ .EXE НА WINDOWS</div>
+              {[
+                "Скачайте Inno Setup: jrsoftware.org/isdl.php",
+                "Откройте setup.iss в Inno Setup Compiler",
+                "Нажмите Build → Compile (Ctrl+F9)",
+                "Или запустите build.bat — он всё сделает сам",
+              ].map((text, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, marginBottom: 5, fontSize: 12, color: "#888899", alignItems: "flex-start" }}>
+                  <span style={{ color: "#7c3aed", fontWeight: 700, flexShrink: 0 }}>{i + 1}.</span>
+                  {text}
                 </div>
-              </div>
-            </PropSection>
+              ))}
+            </div>
 
-            {/* Colors */}
-            <PropSection label="ЦВЕТ ТЕКСТА">
-              <div className="flex flex-wrap gap-1.5">
-                {COLORS.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => updateElement(selectedEl.id, { color: c })}
-                    style={{
-                      width: 22,
-                      height: 22,
-                      borderRadius: 4,
-                      background: c,
-                      border: selectedEl.color === c ? "2px solid #c8ff00" : "2px solid #22223b",
-                      cursor: "pointer",
-                    }}
-                  />
-                ))}
-              </div>
-            </PropSection>
+            <button onClick={download} style={{ width: "100%", padding: "14px 0", borderRadius: 10, background: "#c8ff00", color: "#080810", fontFamily: "'Oswald', sans-serif", fontSize: 15, fontWeight: 700, letterSpacing: 3, border: "none", cursor: "pointer", boxShadow: "0 0 24px #c8ff0040", transition: "box-shadow 0.2s" }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = "0 0 40px #c8ff0080"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.boxShadow = "0 0 24px #c8ff0040"; }}>
+              ⬇ СКАЧАТЬ ZIP-ПАКЕТ
+            </button>
 
-            <PropSection label="ЦВЕТ ФОНА">
-              <div className="flex flex-wrap gap-1.5">
-                {["transparent", ...COLORS].map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => updateElement(selectedEl.id, { bgColor: c })}
-                    style={{
-                      width: 22,
-                      height: 22,
-                      borderRadius: 4,
-                      background: c === "transparent"
-                        ? "repeating-conic-gradient(#22223b 0% 25%, transparent 0% 50%) 0 0 / 10px 10px"
-                        : c,
-                      border: selectedEl.bgColor === c ? "2px solid #c8ff00" : "2px solid #22223b",
-                      cursor: "pointer",
-                    }}
-                  />
-                ))}
-              </div>
-            </PropSection>
-
-            {/* Border radius */}
-            <PropSection label="СКРУГЛЕНИЕ">
-              <input
-                type="range"
-                min={0}
-                max={60}
-                value={selectedEl.borderRadius}
-                onChange={(e) => updateElement(selectedEl.id, { borderRadius: Number(e.target.value) })}
-                className="w-full"
-                style={{ accentColor: "#c8ff00" }}
-              />
-              <div style={{ fontSize: 10, color: "#333355", textAlign: "right" }}>{selectedEl.borderRadius}px</div>
-            </PropSection>
-
-            {/* Opacity */}
-            <PropSection label="ПРОЗРАЧНОСТЬ">
-              <input
-                type="range"
-                min={10}
-                max={100}
-                value={selectedEl.opacity}
-                onChange={(e) => updateElement(selectedEl.id, { opacity: Number(e.target.value) })}
-                className="w-full"
-                style={{ accentColor: "#00ffcc" }}
-              />
-              <div style={{ fontSize: 10, color: "#333355", textAlign: "right" }}>{selectedEl.opacity}%</div>
-            </PropSection>
-
-            {/* Delete */}
-            <button
-              onClick={() => deleteElement(selectedEl.id)}
-              className="mt-3 w-full py-2 rounded text-xs transition-all"
-              style={{
-                background: "#160008",
-                border: "1px solid #330018",
-                color: "#ff2d78",
-                fontFamily: "'Oswald', sans-serif",
-                letterSpacing: 2,
-              }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "#220010"; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "#160008"; }}
-            >
-              УДАЛИТЬ ЭЛЕМЕНТ
+            <button onClick={reset} style={{ width: "100%", padding: "10px 0", borderRadius: 10, background: "transparent", color: "#555577", fontFamily: "'Oswald', sans-serif", fontSize: 11, letterSpacing: 2, border: "1px solid #22223b", cursor: "pointer", transition: "color 0.2s" }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "#ffffff"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = "#555577"; }}>
+              СОЗДАТЬ НОВЫЙ ПАКЕТ
             </button>
           </div>
         )}
-      </aside>
+
+        {/* Nav */}
+        {step !== "build" && step !== "done" && (
+          <div style={{ padding: "14px 24px", borderTop: "1px solid #1a1a2e", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <button onClick={() => setStep(STEPS[stepIdx - 1]?.id ?? "config")} disabled={stepIdx === 0}
+              style={{ padding: "8px 20px", borderRadius: 8, background: "transparent", color: stepIdx === 0 ? "#1a1a2e" : "#555577", border: `1px solid ${stepIdx === 0 ? "#1a1a2e" : "#22223b"}`, fontFamily: "'Oswald', sans-serif", fontSize: 11, letterSpacing: 2, cursor: stepIdx === 0 ? "not-allowed" : "pointer" }}>
+              ← НАЗАД
+            </button>
+
+            {step === "files" ? (
+              <button onClick={buildPackage}
+                style={{ padding: "10px 28px", borderRadius: 8, background: "#c8ff00", color: "#080810", border: "none", fontFamily: "'Oswald', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: 2, cursor: "pointer", boxShadow: "0 0 16px #c8ff0040" }}>
+                СОБРАТЬ ПАКЕТ ⚡
+              </button>
+            ) : (
+              <button onClick={() => canNext && setStep(STEPS[stepIdx + 1].id)} disabled={!canNext}
+                style={{ padding: "10px 28px", borderRadius: 8, background: canNext ? "#c8ff00" : "#12121f", color: canNext ? "#080810" : "#333355", border: `1px solid ${canNext ? "#c8ff00" : "#22223b"}`, fontFamily: "'Oswald', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: 2, cursor: canNext ? "pointer" : "not-allowed" }}>
+                ДАЛЕЕ →
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={{ marginTop: 28, color: "#1a1a2e", fontSize: 10, fontFamily: "'Oswald', sans-serif", letterSpacing: 2 }}>
+        EDITOR CONSTRUCTOR WEB v2.1 — POWERED BY POEHALI.DEV
+      </div>
     </div>
   );
 }
 
-function PropSection({ label, children }: { label: string; children: React.ReactNode }) {
+const iStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "10px 14px",
+  background: "#0d0d1a",
+  border: "1px solid #22223b",
+  borderRadius: 8,
+  color: "#ccccee",
+  fontSize: 14,
+  fontFamily: "'Golos Text', sans-serif",
+  outline: "none",
+  transition: "border-color 0.2s",
+};
+
+function Field({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) {
   return (
-    <div className="mb-3">
-      <div style={{ fontSize: 9, color: "#333355", fontFamily: "'Oswald', sans-serif", letterSpacing: 2, marginBottom: 6 }}>{label}</div>
+    <div>
+      <div style={{ fontSize: 10, color: "#555577", fontFamily: "'Oswald', sans-serif", letterSpacing: 2, marginBottom: 6 }}>
+        {label} {required && <span style={{ color: "#ff2d78" }}>*</span>}
+      </div>
       {children}
     </div>
   );
