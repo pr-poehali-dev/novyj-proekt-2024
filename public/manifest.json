@@ -1,0 +1,12 @@
+{
+  "name": "Editor Constructor",
+  "short_name": "EditorCon",
+  "description": "Конструктор установщиков Windows — работает офлайн",
+  "theme_color": "#080810",
+  "background_color": "#080810",
+  "display": "standalone",
+  "start_url": "/",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
